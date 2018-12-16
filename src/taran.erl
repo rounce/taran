@@ -80,11 +80,11 @@
 connect() ->
   connect("unnamed").
 
-connect(Name) -> 
+connect(Name) ->
   connect(Name, #{}).
 
 % See taran_socket_holder:init_ for connect Options
--spec connect(Name::atom()|list(), Options::map()) -> 
+-spec connect(Name::atom()|list(), Options::map()) ->
     {ok, DBConn::term()} | {err, Reason::term()}.
 connect(Name, Options) when is_atom(Name); Name == "unnamed" -> 
 
@@ -113,10 +113,10 @@ connect(Name, Options) when is_atom(Name); Name == "unnamed" ->
     {ok, _} -> {ok, SupConnName};
     Else    -> Else
   end.
-  
+
 
 -spec connect_list() -> SupChailds::list().
-connect_list() -> 
+connect_list() ->
   supervisor:which_children(taran_sup).
 
 
@@ -124,7 +124,7 @@ connect_list() ->
     TerminateChildReturn::term().
 connect_close({ok, ConnId}) ->
   connect_close(ConnId);
-connect_close(ConnId) -> 
+connect_close(ConnId) ->
   supervisor:terminate_child(taran_sup, ConnId).
 
 
@@ -143,14 +143,14 @@ get_conn_pid(Conn) when is_list(Conn); is_atom(Conn) ->
   case lists:keysearch(Conn, 1, supervisor:which_children(taran_sup)) of
     {value, {_,SupPid,_,_}} ->
       case [WrkPid || {_,WrkPid,_,_} <- supervisor:which_children(SupPid), is_pid(WrkPid)] of
-        WrkPids when WrkPids /= [] -> 
+        WrkPids when WrkPids /= [] ->
           {ok, lists:nth(random_int(length(WrkPids)), WrkPids)};
-        _ -> 
+        _ ->
           {err, empty_sockets}
       end;
     false -> {err, no_such_connection}
   end;
-get_conn_pid(Conn) -> 
+get_conn_pid(Conn) ->
   {err, Conn}.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -159,13 +159,14 @@ get_conn_pid(Conn) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Send to request
 %% @local
-send(Conn, Code, Body) ->
+send(Conn, Code, Body) -> send(Conn, Code, Body, false).
+send(Conn, Code, Body, Async) ->
   Req = #{
     code => Code,
     body => Body},
 
   case get_conn_pid(Conn) of
-    {ok, Pid} -> taran_socket_holder:req(Pid, Req, 3*1000);
+    {ok, Pid} -> taran_socket_holder:req(Pid, Req, Async, 3*1000);
     Else -> Else
   end.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -177,7 +178,7 @@ send(Conn, Code, Body) ->
 %% Args = map with [space_id, index_id, limit, offset, iterator] fields
 %% example:
 %%  select(test_conn, [1], [#{limit => 5}]).
-select(Conn) -> 
+select(Conn) ->
   select(Conn, []).
 select(Conn, Key) ->
   select(Conn, Key, #{}).
@@ -194,7 +195,7 @@ select(Conn, Key, Args) ->
     ?ITERATOR => maps:get(iterator, Args, 16#00),       %% EQ by default
     ?KEY      => Key}, [{pack_str, from_binary}]),
 
-  send(Conn, ?REQUEST_CODE_SELECT, Body).  
+  send(Conn, ?REQUEST_CODE_SELECT, Body).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -206,12 +207,11 @@ insert(Conn, Tuple) ->
 -spec insert(Conn::tarantool_db_conn(), Tuple::list(), Args::map()) -> 
     TarantoolReturn::tarantool_return().
 insert(Conn, Tuple, Args)  when is_list(Tuple) ->
-  
   Body = msgpack:pack(#{
     ?SPACE_ID => maps:get(space_id, Args, 16#00),     %% 0 by default
     ?TUPLE    => Tuple}, [{pack_str, from_binary}]),
 
-  send(Conn, ?REQUEST_CODE_INSERT, Body).
+  send(Conn, ?REQUEST_CODE_INSERT, Body, maps:get(async, Args, false)).
 
 %
 replace(Conn, Tuple) ->
@@ -226,7 +226,7 @@ replace(Conn, Tuple, Args) ->
     ?SPACE_ID => maps:get(space_id, Args, 16#00),       %% 0 by default,
     ?TUPLE    => ListTuple}, [{pack_str, from_binary}]),
 
-  send(Conn, ?REQUEST_CODE_REPLACE, Body).
+  send(Conn, ?REQUEST_CODE_REPLACE, Body, maps:get(async, Args, false)).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -239,14 +239,14 @@ update(Conn, Key, Op) ->
     TarantoolReturn::tarantool_return().
 update(Conn, Key, Op, Args) ->
   % {$+, 2, 1}
-  
+
   Body = msgpack:pack(#{
     ?SPACE_ID => maps:get(space_id, Args, 16#00),  %% 0 by default,
     ?INDEX_ID => maps:get(index_id, Args, 16#00),  %% 0 (primary?) by default,
     ?KEY      => Key,
     ?TUPLE    => Op}, [{pack_str, from_binary}]),
 
-  send(Conn, ?REQUEST_CODE_UPDATE, Body).
+  send(Conn, ?REQUEST_CODE_UPDATE, Body, maps:get(async, Args, false)).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -264,7 +264,7 @@ delete(Conn, Key, Args) ->
     ?INDEX_ID => maps:get(index_id, Args, 16#00),  %% 0 (primary?) by default
     ?KEY      => Key}, [{pack_str, from_binary}]),
 
-  send(Conn, ?REQUEST_CODE_DELETE, Body).
+  send(Conn, ?REQUEST_CODE_DELETE, Body, maps:get(async, Args, false)).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -279,7 +279,7 @@ call(Conn, FuncName) ->
 -spec call(Conn::tarantool_db_conn(), FuncName::binary(), FuncArgs::list()) ->
     TarantoolReturn::tarantool_return().
 call(Conn, FuncName, FuncArgs) ->
-  
+
   <<Body/binary>> = msgpack:pack(#{
     ?FUNC_NAME => FuncName,
     ?TUPLE     => FuncArgs}, [{pack_str, from_binary}]),
@@ -313,7 +313,7 @@ upsert(Conn, Tuple, Ops) ->
 
 -spec upsert(Conn::tarantool_db_conn(), Tuple::list(), Ops::list(), Args::map()) ->
     TarantoolReturn::tarantool_return().
-upsert(Conn, Tuple, Ops, Args) -> 
+upsert(Conn, Tuple, Ops, Args) ->
   ListTuple = tuple_to_list(Tuple),
 
   Body = msgpack:pack(#{
@@ -321,7 +321,7 @@ upsert(Conn, Tuple, Ops, Args) ->
     ?TUPLE    => ListTuple,
     ?OPS      => Ops}, [{pack_str, from_binary}]),
 
-  send(Conn, ?REQUEST_CODE_UPSERT, Body).
+  send(Conn, ?REQUEST_CODE_UPSERT, Body, maps:get(async, Args, false)).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 

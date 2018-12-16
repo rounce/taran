@@ -27,4 +27,3 @@ init([]) ->
       %?CHILD(taran_socket_holder, worker)
     ],
     {ok, { {one_for_one, 5, 10}, Cilds} }.
-

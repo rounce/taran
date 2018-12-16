@@ -4,7 +4,7 @@
 -export([start_link/1, handle_info/2, code_change/3, terminate/2]).
 -export([init/1, handle_call/3, handle_cast/2, code_reload/0]).
 
--export([req/2, req/3]).
+-export([req/3, req/4]).
 
 
 -define(IPROTO_CODE,          16#00).
@@ -35,7 +35,7 @@ handle_call(_Req, _From, State) -> call_unknown(State).
 
 
 -define(S, #{
-  s     => undefined, 
+  s     => undefined,
   stime => erlang:system_time(seconds),
   args  => undefined,
   refs  => [],  %% ordset [{Until, NewSeq, Ref, Pid, Code}]
@@ -49,11 +49,11 @@ handle_call(_Req, _From, State) -> call_unknown(State).
 
 
 %% Args = connect Options
-init_(Args) -> 
+init_(Args) ->
   TcpOpts = [
               {mode, binary}
              ,{packet, raw}
-             %,{active, false}
+             ,{active, false}
              ,{exit_on_close, true}
              %,{backlog, 32}
              %,{delay_send, Mode =/= blocked},
@@ -63,39 +63,28 @@ init_(Args) ->
   case connect(ConnArgs) of
     {ok, Socket}           -> {ok, ?S#{s => Socket, args := ConnArgs}};
     {err, {timeout, Desc}} -> {stop, {shutdown, {timeout, Desc}}};
-    Else -> 
+    Else ->
       timer:sleep(1000), %% sleep for slowdown restarts
-      {stop, {shutdown, Else}} 
-  end. 
+      {stop, {shutdown, Else}}
+  end.
 
- 
-
-connect(_Args = #{host := Host, port := Port, user := User, 
+connect(_Args = #{host := Host, port := Port, user := User,
                   pass := Pass, tcp_opts := TcpOpts, connect_timeout := ConnectTimeout}) ->
   case gen_tcp:connect(Host, Port, TcpOpts, ConnectTimeout) of
     {ok, Socket} ->
-      receive 
-        {tcp, Socket, GreetingData} ->
-          case User == <<"none">> andalso Pass == <<"none">> of 
-            true -> 
-              {ok, Socket};
-            false ->
-              case auth(Socket, User, Pass, GreetingData) of
-                ok -> {ok, Socket};
-                Else -> Else
-              end
-          end;
-        Else -> Else
-      after
-        1000 -> {err, {timeout, receive_tarantool_greeting_timeout}}
+      {ok, GreetingData} = gen_tcp:recv(Socket, 0),
+      case User == <<"none">> andalso Pass == <<"none">> of
+        true -> 
+          {ok, Socket};
+        false ->
+          case auth(Socket, User, Pass, GreetingData) of
+            ok -> {ok, Socket};
+            Else -> Else
+          end
       end;
     {error, timeout} -> {err, {timeout, tarantool_socket_connect_timeout}};
     Else -> Else
   end.
-
-
-
-
 
 
 
@@ -121,9 +110,8 @@ auth(Socket, Login, Password, Greeting) when is_binary(Login), is_binary(Passwor
   Len = msgpack:pack(erlang:size(Body) + erlang:size(Header)),
   Packet = <<Len/binary, Header/binary, Body/binary>>,
   gen_tcp:send(Socket, Packet),
-  AuthRes =
-    receive 
-      {tcp, Socket, AuthResponse} -> 
+  {ok, AuthResponse} = gen_tcp:recv(Socket, 0),
+
         UnpackFun =
           fun
             (Bin, AnswerAcc, F) when Bin /= <<>> ->
@@ -133,16 +121,12 @@ auth(Socket, Login, Password, Greeting) when is_binary(Login), is_binary(Passwor
               end;
             (<<>>, AnswerAcc, _F) -> lists:reverse(AnswerAcc)
           end,
+  AuthRes =
         case UnpackFun(AuthResponse, [], UnpackFun) of 
           [_,#{0 := 0,1 := 0},#{}]    -> ok;
           [_,#{0 := _,1 := _}, Else]  -> {err, Else};
           _ -> {err, auth_err}
-        end;
-      Else -> Else
-    after 
-      1000 -> {err, {timeout, no_auth_response}}
-    end,
-  %io:format("AuthRes: ~p~n", [AuthRes]),
+        end,
   AuthRes;
 
 auth(Socket, Login, Password, Greeting) when is_list(Login) ->
@@ -156,36 +140,43 @@ scramble(<<_Greeting:64/binary, GreetingSalt:44/binary, _Rest/binary>>, Password
   Salt      = binary:part(base64:decode(GreetingSalt), 0, 20),
   Hash1     = crypto:hash(sha, Password),
   Hash2     = crypto:hash(sha, Hash1),
-  
+
   Context1  = crypto:hash_init(sha),
   Context2  = crypto:hash_update(Context1, Salt),
   Context3  = crypto:hash_update(Context2, Hash2),
   Scramble1 = crypto:hash_final(Context3), 
-  
+
   Scramble  = crypto:exor(Hash1, Scramble1),
 
-  Scramble. 
-  
+  Scramble.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % REQUEST
-req(Pid, Req) -> 
-  req(Pid, Req, 5000).
-req(Pid, Req, Timeout) -> 
+req(Pid, Req, Async) ->
+  req(Pid, Req, Async, 5000).
+req(Pid, Req, Async, Timeout) ->
   Ref = erlang:make_ref(),
-  gen_server:cast(Pid, {run, req_, fun req_/5, [Ref, Req, self(), Timeout]}),
-  receive
-    {taran_socket_answer, Ref, Answer} -> Answer
-  after
-    Timeout+200 -> {err, {timeout, request_timeout}}
+  gen_server:cast(Pid, {run, req_, fun req_/6, [Ref, Req, self(), Async, Timeout]}),
+  case Async of
+    false ->
+      receive
+        {taran_socket_answer, Ref, Answer} -> Answer
+      after
+        Timeout+200 -> {err, {timeout, request_timeout}}
+      end;
+    true ->
+      ok
   end.
-%
-req_(State = #{s := Socket, refs := Refs, seq := Seq}, Ref, Req, Pid, Timeout) ->
+
+req_(State = #{s := Socket, refs := Refs, seq := Seq}, Ref, Req, Pid, Async, Timeout) ->
   #{code := Code, body := Body} = Req,
   NewSeq = case Seq > 100000000 of true -> 1; false -> Seq + 1 end,
+  NewState = State#{seq := NewSeq},
+
   HeaderMap = #{
     ?IPROTO_CODE    => Code, %% Example Select
     ?IPROTO_SYNC    => NewSeq},
@@ -197,12 +188,14 @@ req_(State = #{s := Socket, refs := Refs, seq := Seq}, Ref, Req, Pid, Timeout) -
 
   gen_tcp:send(Socket, Packet),
 
-  Now = erlang:system_time(millisecond),
-  Until = Now + Timeout,
-  NewRefs = [{LastUntil,_,_,_,_}|_] = ordsets:add_element({Until, NewSeq, Ref, Pid, Code}, Refs),
-  HolderTimeout = case LastUntil - Now of V when V >= 0 -> V; _ -> 0 end,
+  case Async of
+    false ->
+      {ok, RPacket} = gen_tcp:recv(Socket, 0),
+      recv_(NewState, {tcp, Socket, RPacket});
+    true -> ok
+  end,
 
-  {noreply, State#{seq := NewSeq, refs := NewRefs}, HolderTimeout}.
+  {noreply, NewState}.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -271,21 +264,11 @@ call_unknown(State = #{refs := Refs}) ->
 recv_(State = #{buf := Buf, s := CurSocket}, {tcp, Socket, Packet}) when CurSocket == Socket ->
   {NewBuf, Answers} = parse_(<<Buf/binary, Packet/binary>>),
   NewState = #{refs := Refs} = resp_(State, Answers),
-  case Refs of
-    [{LastUntil,_,_,_,_}|_] -> 
-      Now = erlang:system_time(millisecond),
-      HolderTimeout = case LastUntil - Now of V when V >= 0 -> V; _ -> 0 end,
-      {noreply, NewState#{buf := NewBuf}, HolderTimeout};
-    [] ->
-      {noreply, NewState#{buf := NewBuf}}
-  end.
+  {noreply, NewState#{buf := NewBuf}}.
 
-
-  
-
-parse_(BufPacket) -> 
+parse_(BufPacket) ->
   {NewBuf, AnswerBins} = parse_(BufPacket, _AnswerAcc = []),
-  UnpackFun = 
+  UnpackFun =
     fun
       (Bin, AnswerAcc, F) when Bin /= <<>> ->
         case msgpack:unpack_stream(Bin, [{unpack_str, as_binary}]) of
@@ -295,34 +278,33 @@ parse_(BufPacket) ->
       (<<>>, AnswerAcc, _F) -> lists:reverse(AnswerAcc)
     end,
   Answers = [UnpackFun(AnswerBin, [], UnpackFun) || AnswerBin <- AnswerBins],
-  {NewBuf, Answers}. 
-  
+  {NewBuf, Answers}.
 
-parse_(BufPacket, AnswerAcc) when BufPacket /= <<>> -> 
+
+parse_(BufPacket, AnswerAcc) when BufPacket /= <<>> ->
   case erlang:size(BufPacket) < 5 of
-    true -> 
+    true ->
       {BufPacket, AnswerAcc};
     false ->
       case msgpack:unpack_stream(BufPacket, [{unpack_str, as_binary}]) of
         {Len, RestBin} when is_integer(Len) ->
           case RestBin of
-            <<Bin:Len/binary>> -> 
+            <<Bin:Len/binary>> ->
               %% Complite and Full
               parse_(<<>>, [Bin|AnswerAcc]);
-            <<Bin:Len/binary, NewBuf/binary>> -> 
+            <<Bin:Len/binary, NewBuf/binary>> ->
               %% Complite and Part
               parse_(NewBuf, [Bin|AnswerAcc]);
             _IncompleteRest ->
               {BufPacket, AnswerAcc} %% TODO is in possible?
           end;
-        {error, _Reason} -> 
+        {error, _Reason} ->
           throw({crap_received, BufPacket})
       end
   end;
 parse_(<<>>, AnswerAcc) -> {<<>>, AnswerAcc}.
 
 
-% 
 resp_(State = #{refs := Refs}, [[Header = #{0 := 0}, #{16#30 := AnswerBody}]|Answers]) ->
   #{?IPROTO_SYNC  := Seq} = Header,
   case lists:keytake(Seq, 2, Refs) of
@@ -367,7 +349,7 @@ resp_(State = #{refs := Refs}, [[Header = #{0 := ErrCode}, #{16#31 := AnswerBody
       resp_(State, Answers)
   end;
 %
-resp_(State, []) -> 
+resp_(State, []) ->
   State.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
