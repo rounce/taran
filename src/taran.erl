@@ -88,8 +88,6 @@ connect(Name) ->
     {ok, DBConn::term()} | {err, Reason::term()}.
 connect(Name, Options) when is_atom(Name); Name == "unnamed" -> 
 
-
-  %% TODO put it in to README.md
   FullOptions = #{
     host => maps:get(host, Options, "localhost"), %% TCP Host to connect
     port => maps:get(port, Options, 3301),        %% TCP Port to connect

@@ -31,11 +31,12 @@ USAGE
 {ok, Db} = taran:connect(_ConnName = test).
 {ok,test}
 %% or
-Args = #{host => "127.0.0.1",   %% Host (default "localhost")
-         port => 3301,          %% Port (default 3301)
-         user => <<"none">>,    %% User (default <<"none">>, use guest access)
-         pass => <<"none">>     %% Pass (default <<"none">>, use guest access)
-         cnum => 3},            %% CNum Number of open sokets for connect (default 3)
+Args = #{host => "127.0.0.1",     %% Host (default "localhost")
+         port => 3301,            %% Port (default 3301)
+         user => <<"none">>,      %% User (default <<"none">>, use guest access)
+         pass => <<"none">>       %% Pass (default <<"none">>, use guest access)
+         cnum => 3,               %% CNum Number of open sokets for connect (default 3)
+         connect_timeout => 3000} %% Timeout on gen_tcp:connect in ms (default 3000)
 taran:connect(_ConnName = test, Args).
 {ok,test}
 %% or
